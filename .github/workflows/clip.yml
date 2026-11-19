@@ -1,0 +1,97 @@
+name: Make clips
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "YouTube links (separate with spaces or commas)"
+        required: true
+        type: string
+      max_clips:
+        description: "Max number of clips"
+        default: "16"
+        type: string
+      whisper_model:
+        description: "Whisper model (small = faster, medium = better, large-v3 = best but very slow)"
+        default: "medium"
+        type: choice
+        options: [small, medium, large-v3]
+      language:
+        description: "Language code like ja or en (empty = auto-detect)"
+        required: false
+        default: ""
+        type: string
+      layout:
+        description: "blur = whole frame over blurred background, crop = center crop"
+        default: "blur"
+        type: choice
+        options: [blur, crop]
+      model:
+        description: "GitHub Models model name"
+        default: "openai/gpt-4.1-mini"
+        type: string
+
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  clip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-noto-core
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Cache whisper models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ inputs.whisper_model }}
+
+      - name: Write YouTube cookies (optional)
+        env:
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then printf '%s\n' "$YT_COOKIES" > cookies.txt; fi
+
+      - name: Run clipper
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URLS: ${{ inputs.urls }}
+          MAX_CLIPS: ${{ inputs.max_clips }}
+          WHISPER_MODEL: ${{ inputs.whisper_model }}
+          CLIP_LANGUAGE: ${{ inputs.language }}
+          LAYOUT: ${{ inputs.layout }}
+          CLIP_MODEL: ${{ inputs.model }}
+        run: |
+          ARGS=(--max-clips "$MAX_CLIPS" --whisper-model "$WHISPER_MODEL" --layout "$LAYOUT" --device cpu)
+          if [ -n "$CLIP_LANGUAGE" ]; then ARGS+=(--language "$CLIP_LANGUAGE"); fi
+          if [ -f cookies.txt ]; then ARGS+=(--cookies cookies.txt); fi
+          python clipper.py "${ARGS[@]}"
+
+      - name: Upload clips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clips
+          path: output/
+          retention-days: 7
+          if-no-files-found: warn
+          compression-level: 0
