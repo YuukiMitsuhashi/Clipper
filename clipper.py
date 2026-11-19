@@ -479,11 +479,15 @@ def main():
         sys.exit("No links given.")
 
     model = os.getenv("CLIP_MODEL", "openai/gpt-4.1-mini")
+    failed = 0
     for url in urls:
         try:
             process(url, args, model)
         except Exception as exc:
+            failed += 1
             print(f"  FAILED on {url}: {exc}", flush=True)
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
