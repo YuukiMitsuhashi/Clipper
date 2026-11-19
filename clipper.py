@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Stream Clipper (free): YouTube link -> AI-selected vertical clips with captions.
-Runs on GitHub Actions using GitHub Models as the free AI."""
+"""Stream Clipper: YouTube link -> AI-selected vertical clips with captions.
+Runs on your own PC (or GitHub Actions). Uses GitHub Models as the free AI."""
 
 import argparse
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -21,10 +22,19 @@ API_URL = "https://models.github.ai/inference/chat/completions"
 CJK_LANGS = {"ja", "zh"}  # no spaces between words
 
 
+def default_font():
+    system = platform.system()
+    if system == "Windows":
+        return "Yu Gothic"
+    if system == "Darwin":
+        return "Hiragino Sans"
+    return "Noto Sans CJK JP"
+
+
 # ----------------------------------------------------------------------------
 # 1. Download
 # ----------------------------------------------------------------------------
-def download_video(url, work_dir, cookies=None):
+def download_video(url, work_dir, cookies=None, browser=None):
     work_dir.mkdir(parents=True, exist_ok=True)
     opts = {
         "format": (
@@ -39,6 +49,8 @@ def download_video(url, work_dir, cookies=None):
     }
     if cookies:
         opts["cookiefile"] = cookies
+    if browser:
+        opts["cookiesfrombrowser"] = (browser,)
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
     video_path = work_dir / f"{info['id']}.mp4"
@@ -48,11 +60,11 @@ def download_video(url, work_dir, cookies=None):
 
 
 # ----------------------------------------------------------------------------
-# 2. Transcribe (cached)
+# 2. Transcribe (cached, so re-runs skip this slow step)
 # ----------------------------------------------------------------------------
 def get_transcript(video_path, cache, model_name, language, device):
     if cache.exists():
-        print("  Using cached transcript.")
+        print("  Using cached transcript.", flush=True)
         return json.loads(cache.read_text(encoding="utf-8"))
 
     print(f"  Transcribing with whisper '{model_name}' (slow part)...", flush=True)
@@ -143,7 +155,7 @@ def call_llm(model, user, retries=6):
         try:
             r = requests.post(API_URL, headers=headers, json=body, timeout=180)
         except requests.RequestException as exc:
-            print(f"  network error: {exc}")
+            print(f"  network error: {exc}", flush=True)
             time.sleep(15)
             continue
         if r.status_code == 429:
@@ -152,13 +164,13 @@ def call_llm(model, user, retries=6):
             except ValueError:
                 wait = 30 * (attempt + 1)
             if wait > 300:
-                print("  Rate limit reached (probably the daily free limit). Try again later.")
+                print("  Rate limit reached (probably the daily free limit). Try again later.", flush=True)
                 return {"_limit": True}
-            print(f"  Rate limited, waiting {wait}s...")
+            print(f"  Rate limited, waiting {wait}s...", flush=True)
             time.sleep(wait + 1)
             continue
         if r.status_code != 200:
-            print(f"  AI error {r.status_code}: {r.text[:300]}")
+            print(f"  AI error {r.status_code}: {r.text[:300]}", flush=True)
             return {}
         try:
             content = r.json()["choices"][0]["message"]["content"]
@@ -399,7 +411,9 @@ def render_clip(video_path, start, end, ass_text, out_dir, base_name, layout):
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
         str(out_mp4.resolve()),
     ]
-    subprocess.run(cmd, cwd=out_dir, check=True)  # cwd so subtitles gets a plain filename
+    # cwd = out_dir so the subtitles filter gets a plain filename
+    # (absolute Windows paths with "C:" break ffmpeg filter syntax).
+    subprocess.run(cmd, cwd=out_dir, check=True)
     return out_mp4
 
 
@@ -413,7 +427,7 @@ def slugify(text, n=40):
 def process(url, args, model):
     print(f"\n=== {url}", flush=True)
     work_dir = Path("work")
-    video_path, info = download_video(url, work_dir, args.cookies)
+    video_path, info = download_video(url, work_dir, args.cookies, args.browser)
     print(f"  Downloaded: {info.get('title')}", flush=True)
 
     transcript = get_transcript(
@@ -424,7 +438,7 @@ def process(url, args, model):
     print("  Finding the best moments...", flush=True)
     clips = find_clips(model, transcript, args.max_clips, args.min_len, args.max_len)
     if not clips:
-        print("  No good clips found for this video.")
+        print("  No good clips found for this video.", flush=True)
         return
     print(f"  Selected {len(clips)} clips. Rendering (slow preset, quality first)...", flush=True)
 
@@ -462,17 +476,18 @@ def main():
     p.add_argument("--max-len", type=int, default=60)
     p.add_argument("--layout", choices=["blur", "crop"], default="blur")
     p.add_argument("--whisper-model", default="medium")
-    p.add_argument("--language", default=None)
-    p.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
-    p.add_argument("--font", default="Noto Sans CJK JP")
+    p.add_argument("--language", default=None, help="e.g. ja, en (default: auto-detect)")
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    p.add_argument("--font", default=default_font())
     p.add_argument("--cookies", default=None, help="Netscape cookies.txt for YouTube")
+    p.add_argument("--browser", default=None, help="read cookies from a browser: firefox, chrome, edge...")
     p.add_argument("--out", default="output")
     args = p.parse_args()
 
     if not shutil.which("ffmpeg"):
-        sys.exit("ffmpeg not found on PATH.")
+        sys.exit("ffmpeg not found on PATH. Install it and restart VS Code.")
     if not os.getenv("GITHUB_TOKEN"):
-        sys.exit("GITHUB_TOKEN missing (it is provided automatically in GitHub Actions).")
+        sys.exit('GITHUB_TOKEN missing. In PowerShell run: $env:GITHUB_TOKEN="your_token_here"')
 
     urls = read_urls(args)
     if not urls:
